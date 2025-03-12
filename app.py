@@ -1,65 +1,39 @@
-import os
-from flask import Flask, request, jsonify
-from flask_cors import CORS
 import torch
+from transformers import Blip2Processor, Blip2ForConditionalGeneration
 from PIL import Image
 import pytesseract
+from fastapi import FastAPI, UploadFile, File
 import google.generativeai as genai
-from torchvision import transforms
-from models.blip import blip_decoder  # Ensure this is correctly imported
+import io
 
-# Initialize Flask
-app = Flask(__name__)
-CORS(app)
+app = FastAPI()
 
-# Set device
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-image_size = 384
+# Load BLIP-2 Processor and Model
+processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
+model = Blip2ForConditionalGeneration.from_pretrained("Salesforce/blip2-opt-2.7b", torch_dtype=torch.float16)
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model.to(device)
 
-# Function to load the image for BLIP processing
-def load_demo_image(image_path, image_size, device):
-    image = Image.open(image_path).convert("RGB")
-    transform = transforms.Compose([
-        transforms.Resize((image_size, image_size)),
-        transforms.ToTensor(),
-    ])
-    image_tensor = transform(image).unsqueeze(0).to(device)
-    return image_tensor
+def captionImage(image_path):
+    image = Image.open(io.BytesIO(image_path))
+    extracted_text = pytesseract.image_to_string(image)
+    #return extracted_text.strip()
 
-# Load BLIP Model
-model_url = 'https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model_base_capfilt_large.pth'
-model = blip_decoder(pretrained=model_url, image_size=image_size, vit='base')
-model.eval().to(device)
-
-# Configure Gemini API
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-gemini_model = genai.GenerativeModel("gemini-2.0-flash")
-
-@app.route("/generate-captions", methods=["POST"])
-def generate_captions():
-    if "image" not in request.files:
-        return jsonify({"error": "No image file uploaded"}), 400
-
-    image_file = request.files["image"]
-    pil_image = Image.open(image_file).convert("RGB")
-
-    # Extract text using OCR
-    extracted_text = pytesseract.image_to_string(pil_image).strip()
-
-    # Generate caption using BLIP
-    image_tensor = load_demo_image(image_file, image_size, device)
+    image = image.convert("RGB")
+    inputs = processor(images=image, return_tensors="pt").to(device, torch.float16)
+    # Generate caption
     with torch.no_grad():
-        caption = model.generate(image_tensor, sample=False, num_beams=1, max_length=20, min_length=5)[0]
+        caption_ids = model.generate(**inputs)
+    caption = processor.batch_decode(caption_ids, skip_special_tokens=True)[0]
+    final_caption = caption + " " + extracted_text
+    return final_caption
 
-    # Combine BLIP caption and OCR text
-    final_caption = caption if not extracted_text else f"{caption} | {extracted_text}"
-
-    # Get social media captions from Gemini
-    gemini_prompt = f"Write different types of captions for social media based on this image description: {final_caption}"
-    response = gemini_model.generate_content(gemini_prompt)
-
-    return jsonify({"blip_caption": caption, "ocr_text": extracted_text, "gemini_captions": response.text})
-
-# Run the app
-if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+@app.post("/process-image/")
+async def process_image(file: UploadFile = File(...)):
+    """API to process uploaded image and return captions + OCR text"""
+    image = await file.read()
+    caption = captionImage(image)
+    genai.configure(api_key="AIzaSyCqMzs1Cu-hs3O6va_QmlkI3Qoo56lrnXw")
+    model2 = genai.GenerativeModel("gemini-2.0-flash")
+    response = model2.generate_content(f"Give me caption suggestions for social media based on the following text: {caption}")
+    return {"caption": response.text}
