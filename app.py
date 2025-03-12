@@ -1,3 +1,4 @@
+import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import torch
@@ -31,7 +32,7 @@ model = blip_decoder(pretrained=model_url, image_size=image_size, vit='base')
 model.eval().to(device)
 
 # Configure Gemini API
-genai.configure(api_key="API_KEY")  # Use env variable in production
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 gemini_model = genai.GenerativeModel("gemini-2.0-flash")
 
 @app.route("/generate-captions", methods=["POST"])
